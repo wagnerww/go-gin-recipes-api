@@ -7,7 +7,11 @@
 // 	BasePath: /
 // 	Version: 1.0.0
 // 	Contact: Wagner Ricardo Wagner<wagnerricardonet@gmail.com>
-//
+//  SecurityDefinitions:
+//  api_key:
+//    type: apiKey
+//    name: Authorization
+//    in: header
 // 	Consumes:
 // 	- application/json
 //
@@ -22,22 +26,31 @@ import (
 	"log"
 	"os"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis"
+	"github.com/joho/godotenv"
 	"github.com/wagnerww/go-gin-recipes-api.git/handlers"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 )
 
-var ctx context.Context
-var err error
-var client *mongo.Client
-var collection *mongo.Collection
-
 var recipesHandler *handlers.RecipesHandler
+var authHandler *handlers.AuthHandler
 
 func init() {
+
+	profile := os.Getenv("PROFILE")
+	var env = "./env/.env"
+	if profile != "" {
+		env = env + "." + profile
+	}
+
+	if err := godotenv.Load(env); err != nil {
+		log.Printf("No .env file found")
+	}
+
 	ctx := context.Background()
 	client, err := mongo.Connect(ctx,
 		options.Client().ApplyURI(os.Getenv("MONGO_URI")))
@@ -48,6 +61,9 @@ func init() {
 
 	collection := client.Database(os.Getenv(
 		"MONGO_DATABASE")).Collection("recipes")
+
+	collectionUsers := client.Database(os.Getenv(
+		"MONGO_DATABASE")).Collection("users")
 
 	log.Println("Connected to MongoDB")
 
@@ -61,6 +77,8 @@ func init() {
 
 	recipesHandler = handlers.NewRecipesHandler(ctx,
 		collection, redisClient)
+	authHandler = handlers.NewAuthHandler(ctx, collectionUsers)
+
 }
 
 func NewRecipeHandler(c *gin.Context) {
@@ -144,13 +162,42 @@ func SearchRecipesHandler(c *gin.Context) {
 	*/
 }
 
-func main() {
+func SetupServer() *gin.Engine {
 	router := gin.Default()
+	router.Use(cors.Default())
+
+	/* PERSONALIZADO
+
+	router.Use(cors.New(cors.Config{
+			AllowOrigins:     []string{"http://localhost
+													:3000"},
+			AllowMethods:     []string{"GET", "OPTIONS"},
+			AllowHeaders:     []string{"Origin"},
+			ExposeHeaders:    []string{"Content-Length"},
+			AllowCredentials: true,
+			MaxAge: 12 * time.Hour,
+		}))
+
+	*/
+
+	router.Use(gin.LoggerWithFormatter(func(
+		param gin.LogFormatterParams) string {
+		return fmt.Sprintf("[%s] %s %s %d %s\n",
+			param.TimeStamp.Format("2006-01-02T15:04:05"),
+			param.Method,
+			param.Path,
+			param.StatusCode,
+			param.Latency,
+		)
+	}))
 
 	router.GET("/recipes", ListRecipesHandler)
+	router.POST("/signin", authHandler.SignInHandler)
+	router.POST("/signup", authHandler.SignUpHandler)
+	router.POST("/refresh", authHandler.RefreshHandler)
 
 	authorized := router.Group("/")
-	authorized.Use(AuthMiddleware())
+	authorized.Use(authHandler.AuthMiddleware())
 	{
 		authorized.POST("/recipes", NewRecipeHandler)
 
@@ -158,14 +205,9 @@ func main() {
 		authorized.DELETE("/recipes/:id", DeleteRecipeHandler)
 		authorized.GET("/recipes/search", SearchRecipesHandler)
 	}
-	router.Run()
+	return router
 }
 
-func AuthMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if c.GetHeader("X-API-KEY") != os.Getenv("X_API_KEY") {
-			c.AbortWithStatus(401)
-		}
-		c.Next()
-	}
+func main() {
+	SetupServer().Run()
 }
